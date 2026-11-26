@@ -8,6 +8,7 @@ Integration note:
 
 from datetime import datetime, timezone
 import re
+import sqlite3
 
 from backend.models.ngo import ConflictError, get_ngo_by_id
 
@@ -168,7 +169,9 @@ def validate_activity_payload(data, is_update=False):
     if not is_update:
         for field in REQUIRED_ACTIVITY_FIELDS:
             raw = data.get(field)
-            value = "" if raw is None else str(raw).strip()
+            if raw is not None and not isinstance(raw, str):
+                raise ValueError(f"'{field}' must be a string.")
+            value = "" if raw is None else raw.strip()
             if not value:
                 raise ValueError(f"'{field}' is required.")
             cleaned[field] = value
@@ -185,19 +188,25 @@ def validate_activity_payload(data, is_update=False):
                 max_value=MAX_VOLUNTEERS_NEEDED,
             )
         elif field == "status":
-            status_val = str(data[field]).strip().lower()
+            if not isinstance(data[field], str):
+                raise ValueError("'status' must be a string.")
+            status_val = data[field].strip().lower()
             if status_val not in VALID_ACTIVITY_STATUSES:
                 raise ValueError(
                     f"'status' must be one of: {', '.join(sorted(VALID_ACTIVITY_STATUSES))}."
                 )
             cleaned[field] = status_val
         elif field == "event_date":
-            value = str(data[field]).strip()
+            if not isinstance(data[field], str):
+                raise ValueError("'event_date' must be a string.")
+            value = data[field].strip()
             if not value:
                 raise ValueError("'event_date' cannot be empty.")
             cleaned[field] = _validate_event_date(value)
         else:
-            value = str(data[field]).strip()
+            if not isinstance(data[field], str):
+                raise ValueError(f"'{field}' must be a string.")
+            value = data[field].strip()
             if field in REQUIRED_ACTIVITY_FIELDS and not value:
                 raise ValueError(f"'{field}' cannot be empty.")
             max_len = ACTIVITY_FIELD_MAX_LENGTHS[field]
@@ -223,28 +232,36 @@ def create_activity(db, ngo_id, data):
     cleaned = validate_activity_payload(data, is_update=False)
     now = _utc_now_iso()
 
-    cursor = db.execute(
-        """
-        INSERT INTO activities (
-            ngo_id, title, description, category, location,
-            event_date, volunteers_needed, status, created_at, updated_at
+    try:
+        cursor = db.execute(
+            """
+            INSERT INTO activities (
+                ngo_id, title, description, category, location,
+                event_date, volunteers_needed, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ngo_id,
+                cleaned["title"],
+                cleaned["description"],
+                cleaned.get("category", ""),
+                cleaned["location"],
+                cleaned["event_date"],
+                cleaned.get("volunteers_needed", 1),
+                cleaned.get("status", "open"),
+                now,
+                now,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            ngo_id,
-            cleaned["title"],
-            cleaned["description"],
-            cleaned.get("category", ""),
-            cleaned["location"],
-            cleaned["event_date"],
-            cleaned.get("volunteers_needed", 1),
-            cleaned.get("status", "open"),
-            now,
-            now,
-        ),
-    )
-    db.commit()
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ConflictError("Activity could not be created due to a database constraint.") from exc
+    except sqlite3.Error:
+        db.rollback()
+        raise
+
     return get_activity_by_id(db, cursor.lastrowid, ngo_id=ngo_id)
 
 
@@ -257,6 +274,8 @@ def list_activities_by_ngo(
     params = [ngo_id]
 
     if status is not None:
+        if not isinstance(status, str):
+            raise ValueError("Invalid status filter. Status must be a string.")
         normalized_status = status.strip().lower()
         if normalized_status not in VALID_ACTIVITY_STATUSES:
             raise ValueError(
@@ -296,11 +315,18 @@ def update_activity(db, activity_id, ngo_id, data):
     assignments = ", ".join(f"{field} = ?" for field in cleaned)
     values = list(cleaned.values()) + [activity_id, ngo_id]
 
-    db.execute(
-        f"UPDATE activities SET {assignments} WHERE id = ? AND ngo_id = ?",
-        values,
-    )
-    db.commit()
+    try:
+        db.execute(
+            f"UPDATE activities SET {assignments} WHERE id = ? AND ngo_id = ?",
+            values,
+        )
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ConflictError("Activity could not be updated due to a database constraint.") from exc
+    except sqlite3.Error:
+        db.rollback()
+        raise
     return get_activity_by_id(db, activity_id, ngo_id=ngo_id)
 
 
@@ -310,11 +336,18 @@ def delete_activity(db, activity_id, ngo_id):
     if existing is None:
         raise LookupError("Activity not found for this NGO.")
 
-    db.execute(
-        "DELETE FROM activities WHERE id = ? AND ngo_id = ?",
-        (activity_id, ngo_id),
-    )
-    db.commit()
+    try:
+        db.execute(
+            "DELETE FROM activities WHERE id = ? AND ngo_id = ?",
+            (activity_id, ngo_id),
+        )
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ConflictError("Activity could not be deleted due to a database constraint.") from exc
+    except sqlite3.Error:
+        db.rollback()
+        raise
     return existing
 
 
@@ -346,6 +379,8 @@ def list_requests_for_ngo(
         params.append(clean_activity_id)
 
     if status is not None:
+        if not isinstance(status, str):
+            raise ValueError("Invalid request status filter. Status must be a string.")
         normalized_status = status.strip().lower()
         if normalized_status not in VALID_REQUEST_STATUSES:
             raise ValueError(
