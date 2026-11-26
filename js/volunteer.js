@@ -192,6 +192,14 @@ shell(
             </select>
           </div>
         </div>
+        <div class="row g-2 mb-3">
+          <div class="col-md-4 ms-auto">
+            <select id="sort" class="form-select">
+              <option value="upcoming">Upcoming first</option>
+              <option value="latest">Latest first</option>
+            </select>
+          </div>
+        </div>
         <div class="row g-3" id="list"></div>
       `;
 
@@ -203,6 +211,11 @@ shell(
           [a.title, a.location, a.ngo].some(value => String(value || "").toLowerCase().includes(q)) &&
           (!f || a.location === f)
         );
+
+        activities.sort((a, b) => {
+          const comparison = a.date.localeCompare(b.date);
+          return $('#sort').value === 'latest' ? -comparison : comparison;
+        });
 
         $('#list').innerHTML = activities.length
           ? activities.map(a => {
@@ -235,6 +248,7 @@ shell(
       draw();
       $('#q').oninput = draw;
       $('#f').onchange = draw;
+      $('#sort').onchange = draw;
 
       el.onclick = e => {
         const j = e.target.closest('[data-j]');
