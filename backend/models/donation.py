@@ -160,22 +160,40 @@ def _validate_pagination(limit, offset):
     return clean_limit, clean_offset
 
 
+def _require_string_field(data, field_name, required=True, max_length=None):
+    """Extract and validate a string field from a payload dictionary."""
+    raw = data.get(field_name)
+    if raw is None:
+        if required:
+            raise ValueError(f"'{field_name}' is required.")
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError(f"'{field_name}' must be a string.")
+    value = raw.strip()
+    if required and not value:
+        raise ValueError(f"'{field_name}' is required.")
+    if max_length is not None and len(value) > max_length:
+        raise ValueError(f"'{field_name}' must be at most {max_length} characters.")
+    return value
+
+
 def validate_donation_payload(data):
     """Validate and normalize monetary or in-kind donation submission fields."""
     if not isinstance(data, dict):
         raise ValueError("Invalid donation payload.")
 
-    donor_name = "" if data.get("donor_name") is None else str(data["donor_name"]).strip()
-    if not donor_name:
-        raise ValueError("'donor_name' is required.")
-    if len(donor_name) > DONATION_FIELD_MAX_LENGTHS["donor_name"]:
-        raise ValueError(
-            f"'donor_name' must be at most {DONATION_FIELD_MAX_LENGTHS['donor_name']} characters."
-        )
-
-    donor_email = "" if data.get("donor_email") is None else str(data["donor_email"]).strip()
-    if not donor_email:
-        raise ValueError("'donor_email' is required.")
+    donor_name = _require_string_field(
+        data,
+        "donor_name",
+        required=True,
+        max_length=DONATION_FIELD_MAX_LENGTHS["donor_name"],
+    )
+    donor_email = _require_string_field(
+        data,
+        "donor_email",
+        required=True,
+        max_length=DONATION_FIELD_MAX_LENGTHS["donor_email"],
+    )
     if not _validate_email(donor_email):
         raise ValueError("Please provide a valid 'donor_email'.")
 
@@ -188,7 +206,9 @@ def validate_donation_payload(data):
     if raw_activity_id not in (None, ""):
         activity_id = _parse_strict_int(raw_activity_id, "activity_id", min_value=1)
 
-    donation_type = str(data.get("donation_type", "")).strip().lower()
+    donation_type = _require_string_field(
+        data, "donation_type", required=True
+    ).lower()
     if donation_type not in VALID_DONATION_TYPES:
         raise ValueError(
             f"'donation_type' must be one of: {', '.join(sorted(VALID_DONATION_TYPES))}."
@@ -214,14 +234,12 @@ def validate_donation_payload(data):
         if amount > MAX_DONATION_AMOUNT:
             raise ValueError(f"'amount' must be at most {MAX_DONATION_AMOUNT:.2f}.")
     else:
-        raw_item = data.get("item_description")
-        item_description = "" if raw_item is None else str(raw_item).strip()
-        if not item_description:
-            raise ValueError("'item_description' is required for in-kind donations.")
-        if len(item_description) > DONATION_FIELD_MAX_LENGTHS["item_description"]:
-            raise ValueError(
-                f"'item_description' must be at most {DONATION_FIELD_MAX_LENGTHS['item_description']} characters."
-            )
+        item_description = _require_string_field(
+            data,
+            "item_description",
+            required=True,
+            max_length=DONATION_FIELD_MAX_LENGTHS["item_description"],
+        )
         if data.get("quantity") in (None, ""):
             raise ValueError("'quantity' is required for in-kind donations.")
         quantity = _parse_strict_int(
@@ -231,12 +249,12 @@ def validate_donation_payload(data):
             max_value=MAX_DONATION_QUANTITY,
         )
 
-    raw_notes = data.get("notes")
-    notes = "" if raw_notes is None else str(raw_notes).strip()
-    if len(notes) > DONATION_FIELD_MAX_LENGTHS["notes"]:
-        raise ValueError(
-            f"'notes' must be at most {DONATION_FIELD_MAX_LENGTHS['notes']} characters."
-        )
+    notes = _require_string_field(
+        data,
+        "notes",
+        required=False,
+        max_length=DONATION_FIELD_MAX_LENGTHS["notes"],
+    )
 
     return {
         "donor_name": donor_name,
@@ -282,6 +300,11 @@ def _verify_ngo_and_activity(db, ngo_id, activity_id):
 
 def create_donation(db, data, donor_id=None):
     """Create a new monetary or in-kind donation linked to an approved NGO."""
+    clean_donor_id = (
+        None
+        if donor_id is None
+        else _parse_strict_int(donor_id, "donor_id", min_value=1)
+    )
     cleaned = validate_donation_payload(data)
     _verify_ngo_and_activity(db, cleaned["ngo_id"], cleaned["activity_id"])
 
@@ -299,7 +322,7 @@ def create_donation(db, data, donor_id=None):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
             """,
             (
-                donor_id,
+                clean_donor_id,
                 cleaned["donor_name"],
                 cleaned["donor_email"],
                 cleaned["ngo_id"],
@@ -318,22 +341,28 @@ def create_donation(db, data, donor_id=None):
     except sqlite3.IntegrityError as exc:
         db.rollback()
         raise ConflictError("Donation could not be recorded due to a conflict.") from exc
+    except sqlite3.Error:
+        db.rollback()
+        raise
 
     return get_donation_by_id(db, cursor.lastrowid)
 
 
 def get_donation_by_id(db, donation_id, donor_id=None, ngo_id=None):
     """Fetch a single donation, optionally scoped by donor_id or ngo_id."""
+    clean_donation_id = _parse_strict_int(donation_id, "donation_id", min_value=1)
     query = f"{_DONATION_SELECT_SQL} WHERE d.id = ?"
-    params = [donation_id]
+    params = [clean_donation_id]
 
     if donor_id is not None:
+        clean_donor_id = _parse_strict_int(donor_id, "donor_id", min_value=1)
         query += " AND d.donor_id = ?"
-        params.append(donor_id)
+        params.append(clean_donor_id)
 
     if ngo_id is not None:
+        clean_ngo_id = _parse_strict_int(ngo_id, "ngo_id", min_value=1)
         query += " AND d.ngo_id = ?"
-        params.append(ngo_id)
+        params.append(clean_ngo_id)
 
     row = db.execute(query, params).fetchone()
     return _serialize_donation(row)
@@ -343,11 +372,14 @@ def list_donations_by_donor(
     db, donor_id, status=None, limit=DEFAULT_PAGE_LIMIT, offset=0
 ):
     """List donations submitted by a specific donor with pagination."""
+    clean_donor_id = _parse_strict_int(donor_id, "donor_id", min_value=1)
     clean_limit, clean_offset = _validate_pagination(limit, offset)
     query = f"{_DONATION_SELECT_SQL} WHERE d.donor_id = ?"
-    params = [donor_id]
+    params = [clean_donor_id]
 
     if status is not None:
+        if not isinstance(status, str):
+            raise ValueError("Invalid status filter. Status must be a string.")
         normalized_status = status.strip().lower()
         if normalized_status not in VALID_DONATION_STATUSES:
             raise ValueError(
@@ -366,9 +398,10 @@ def list_donations_for_ngo(
     db, ngo_id, activity_id=None, status=None, limit=DEFAULT_PAGE_LIMIT, offset=0
 ):
     """List donations received by a specific NGO with pagination."""
+    clean_ngo_id = _parse_strict_int(ngo_id, "ngo_id", min_value=1)
     clean_limit, clean_offset = _validate_pagination(limit, offset)
     query = f"{_DONATION_SELECT_SQL} WHERE d.ngo_id = ?"
-    params = [ngo_id]
+    params = [clean_ngo_id]
 
     if activity_id is not None:
         clean_activity_id = _parse_strict_int(activity_id, "activity_id", min_value=1)
@@ -376,6 +409,8 @@ def list_donations_for_ngo(
         params.append(clean_activity_id)
 
     if status is not None:
+        if not isinstance(status, str):
+            raise ValueError("Invalid status filter. Status must be a string.")
         normalized_status = status.strip().lower()
         if normalized_status not in VALID_DONATION_STATUSES:
             raise ValueError(
@@ -392,13 +427,18 @@ def list_donations_for_ngo(
 
 def update_donation_status_by_ngo(db, donation_id, ngo_id, new_status):
     """Update donation status for an NGO-owned donation following type-specific transitions."""
-    normalized_status = str(new_status).strip().lower()
+    clean_donation_id = _parse_strict_int(donation_id, "donation_id", min_value=1)
+    clean_ngo_id = _parse_strict_int(ngo_id, "ngo_id", min_value=1)
+    if not isinstance(new_status, str):
+        raise ValueError("Invalid status. Status must be a string.")
+
+    normalized_status = new_status.strip().lower()
     if normalized_status not in VALID_DONATION_STATUSES:
         raise ValueError(
             f"Invalid status. Must be one of: {', '.join(sorted(VALID_DONATION_STATUSES))}."
         )
 
-    existing = get_donation_by_id(db, donation_id, ngo_id=ngo_id)
+    existing = get_donation_by_id(db, clean_donation_id, ngo_id=clean_ngo_id)
     if existing is None:
         raise LookupError("Donation not found for this NGO.")
 
@@ -411,21 +451,31 @@ def update_donation_status_by_ngo(db, donation_id, ngo_id, new_status):
         )
 
     now = _utc_now_iso()
-    cursor = db.execute(
-        "UPDATE donations SET status = ?, updated_at = ? WHERE id = ? AND ngo_id = ? AND status = ?",
-        (normalized_status, now, donation_id, ngo_id, existing["status"]),
-    )
-    if cursor.rowcount == 0:
+    try:
+        cursor = db.execute(
+            "UPDATE donations SET status = ?, updated_at = ? WHERE id = ? AND ngo_id = ? AND status = ?",
+            (normalized_status, now, clean_donation_id, clean_ngo_id, existing["status"]),
+        )
+        if cursor.rowcount == 0:
+            db.rollback()
+            raise ConflictError("Donation status changed concurrently and could not be updated.")
+        db.commit()
+    except sqlite3.IntegrityError as exc:
         db.rollback()
-        raise ConflictError("Donation status changed concurrently and could not be updated.")
+        raise ConflictError("Donation status could not be updated due to a constraint.") from exc
+    except sqlite3.Error:
+        db.rollback()
+        raise
 
-    db.commit()
-    return get_donation_by_id(db, donation_id, ngo_id=ngo_id)
+    return get_donation_by_id(db, clean_donation_id, ngo_id=clean_ngo_id)
 
 
 def cancel_donation_by_donor(db, donation_id, donor_id):
     """Allow the submitting donor to cancel a donation while it is still pending."""
-    existing = get_donation_by_id(db, donation_id, donor_id=donor_id)
+    clean_donation_id = _parse_strict_int(donation_id, "donation_id", min_value=1)
+    clean_donor_id = _parse_strict_int(donor_id, "donor_id", min_value=1)
+
+    existing = get_donation_by_id(db, clean_donation_id, donor_id=clean_donor_id)
     if existing is None:
         raise LookupError("Donation not found for this donor.")
 
@@ -435,13 +485,20 @@ def cancel_donation_by_donor(db, donation_id, donor_id):
         )
 
     now = _utc_now_iso()
-    cursor = db.execute(
-        "UPDATE donations SET status = 'cancelled', updated_at = ? WHERE id = ? AND donor_id = ? AND status = 'pending'",
-        (now, donation_id, donor_id),
-    )
-    if cursor.rowcount == 0:
+    try:
+        cursor = db.execute(
+            "UPDATE donations SET status = 'cancelled', updated_at = ? WHERE id = ? AND donor_id = ? AND status = 'pending'",
+            (now, clean_donation_id, clean_donor_id),
+        )
+        if cursor.rowcount == 0:
+            db.rollback()
+            raise ConflictError("Donation status changed concurrently and could not be cancelled.")
+        db.commit()
+    except sqlite3.IntegrityError as exc:
         db.rollback()
-        raise ConflictError("Donation status changed concurrently and could not be cancelled.")
+        raise ConflictError("Donation could not be cancelled due to a constraint.") from exc
+    except sqlite3.Error:
+        db.rollback()
+        raise
 
-    db.commit()
-    return get_donation_by_id(db, donation_id, donor_id=donor_id)
+    return get_donation_by_id(db, clean_donation_id, donor_id=clean_donor_id)
