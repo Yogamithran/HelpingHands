@@ -355,6 +355,7 @@ def list_requests_for_ngo(
     db, ngo_id, activity_id=None, status=None, limit=DEFAULT_PAGE_LIMIT, offset=0
 ):
     """List volunteer participation requests for activities owned by `ngo_id`."""
+    clean_ngo_id = _parse_strict_int(ngo_id, "ngo_id", min_value=1)
     clean_limit, clean_offset = _validate_pagination(limit, offset)
     query = """
         SELECT
@@ -371,7 +372,7 @@ def list_requests_for_ngo(
         INNER JOIN activities a ON pr.activity_id = a.id
         WHERE a.ngo_id = ?
     """
-    params = [ngo_id]
+    params = [clean_ngo_id]
 
     if activity_id is not None:
         clean_activity_id = _parse_strict_int(activity_id, "activity_id", min_value=1)
@@ -421,13 +422,19 @@ def _fetch_ngo_request(db, request_id, ngo_id):
 
 def review_participation_request(db, request_id, ngo_id, decision, reviewer_user_id):
     """Approve or reject a pending volunteer request for an approved NGO."""
-    _require_approved_ngo(db, ngo_id)
+    clean_request_id = _parse_strict_int(request_id, "request_id", min_value=1)
+    clean_ngo_id = _parse_strict_int(ngo_id, "ngo_id", min_value=1)
+    clean_reviewer_id = _parse_strict_int(reviewer_user_id, "reviewer_user_id", min_value=1)
 
-    normalized_decision = str(decision).strip().lower()
+    _require_approved_ngo(db, clean_ngo_id)
+
+    if not isinstance(decision, str):
+        raise ValueError("Decision must be 'approved' or 'rejected'.")
+    normalized_decision = decision.strip().lower()
     if normalized_decision not in VALID_REVIEW_DECISIONS:
         raise ValueError("Decision must be 'approved' or 'rejected'.")
 
-    row = _fetch_ngo_request(db, request_id, ngo_id)
+    row = _fetch_ngo_request(db, clean_request_id, clean_ngo_id)
     if row is None:
         raise LookupError("Participation request not found for this NGO.")
 
@@ -442,62 +449,78 @@ def review_participation_request(db, request_id, ngo_id, decision, reviewer_user
 
     reviewed_at = _utc_now_iso()
 
-    if normalized_decision == "approved":
-        if activity_status != "open":
-            raise ConflictError(
-                f"Cannot approve requests when activity status is '{activity_status}'."
+    try:
+        if normalized_decision == "approved":
+            if activity_status != "open":
+                raise ConflictError(
+                    f"Cannot approve requests when activity status is '{activity_status}'."
+                )
+
+            # Atomic conditional update ensures concurrent approvals cannot exceed volunteers_needed.
+            cursor = db.execute(
+                """
+                UPDATE participation_requests
+                SET status = 'approved', reviewed_by = ?, reviewed_at = ?
+                WHERE id = ?
+                  AND status = 'pending'
+                  AND (
+                      SELECT COUNT(*)
+                      FROM participation_requests
+                      WHERE activity_id = ? AND status = 'approved'
+                  ) < (
+                      SELECT volunteers_needed
+                      FROM activities
+                      WHERE id = ? AND status = 'open'
+                  )
+                """,
+                (
+                    clean_reviewer_id,
+                    reviewed_at,
+                    clean_request_id,
+                    request_record["activity_id"],
+                    request_record["activity_id"],
+                ),
             )
+            if cursor.rowcount == 0:
+                db.rollback()
+                approved_row = db.execute(
+                    "SELECT COUNT(*) FROM participation_requests WHERE activity_id = ? AND status = 'approved'",
+                    (request_record["activity_id"],),
+                ).fetchone()
+                approved_count = (
+                    approved_row[0]
+                    if not isinstance(approved_row, dict)
+                    else next(iter(approved_row.values()))
+                )
+                if approved_count >= volunteers_needed:
+                    raise ConflictError(
+                        "Volunteer capacity for this activity has already been reached."
+                    )
+                raise ConflictError(
+                    "Participation request could not be approved due to a state conflict."
+                )
+        else:
+            cursor = db.execute(
+                """
+                UPDATE participation_requests
+                SET status = 'rejected', reviewed_by = ?, reviewed_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (clean_reviewer_id, reviewed_at, clean_request_id),
+            )
+            if cursor.rowcount == 0:
+                db.rollback()
+                raise ConflictError("Participation request has already been processed.")
 
-        # Atomic conditional update ensures concurrent approvals cannot exceed volunteers_needed.
-        cursor = db.execute(
-            """
-            UPDATE participation_requests
-            SET status = 'approved', reviewed_by = ?, reviewed_at = ?
-            WHERE id = ?
-              AND status = 'pending'
-              AND (
-                  SELECT COUNT(*)
-                  FROM participation_requests
-                  WHERE activity_id = ? AND status = 'approved'
-              ) < (
-                  SELECT volunteers_needed
-                  FROM activities
-                  WHERE id = ? AND status = 'open'
-              )
-            """,
-            (
-                reviewer_user_id,
-                reviewed_at,
-                request_id,
-                request_record["activity_id"],
-                request_record["activity_id"],
-            ),
-        )
-        if cursor.rowcount == 0:
-            db.rollback()
-            approved_row = db.execute(
-                "SELECT COUNT(*) FROM participation_requests WHERE activity_id = ? AND status = 'approved'",
-                (request_record["activity_id"],),
-            ).fetchone()
-            approved_count = approved_row[0] if not isinstance(approved_row, dict) else next(iter(approved_row.values()))
-            if approved_count >= volunteers_needed:
-                raise ConflictError("Volunteer capacity for this activity has already been reached.")
-            raise ConflictError("Participation request could not be approved due to a state conflict.")
-    else:
-        cursor = db.execute(
-            """
-            UPDATE participation_requests
-            SET status = 'rejected', reviewed_by = ?, reviewed_at = ?
-            WHERE id = ? AND status = 'pending'
-            """,
-            (reviewer_user_id, reviewed_at, request_id),
-        )
-        if cursor.rowcount == 0:
-            db.rollback()
-            raise ConflictError("Participation request has already been processed.")
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ConflictError("Participation request could not be updated due to a database constraint.") from exc
+    except sqlite3.Error:
+        db.rollback()
+        raise
 
-    db.commit()
     request_record["status"] = normalized_decision
-    request_record["reviewed_by"] = reviewer_user_id
+    request_record["reviewed_by"] = clean_reviewer_id
     request_record["reviewed_at"] = reviewed_at
     return request_record
