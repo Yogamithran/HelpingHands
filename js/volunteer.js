@@ -294,12 +294,36 @@ shell(
 
     // MY REQUESTS
     if (tab === 'reqs') {
-      el.innerHTML = `
-        <div class="panel">
-          <h5 class="mb-3">My requests</h5>
-          ${tbl(mine)}
-        </div>
-      `;
+      const renderRequests = status => {
+        const filtered = status === 'All'
+          ? mine
+          : mine.filter(r => r.status === status);
+
+        el.innerHTML = `
+          <div class="panel">
+            <h5 class="mb-3">My requests</h5>
+            <div class="d-flex flex-wrap gap-2 mb-3">
+              ${['All', 'Pending', 'Approved', 'Rejected'].map(value => `
+                <button type="button"
+                  class="btn btn-sm ${status === value ? 'btn-green' : 'btn-outline-hh'}"
+                  data-request-filter="${value}">
+                  ${value}
+                </button>
+              `).join('')}
+            </div>
+            ${tbl(filtered)}
+          </div>
+        `;
+      };
+
+      renderRequests('All');
+
+      el.onclick = e => {
+        const filter = e.target.closest('[data-request-filter]');
+        if (filter) {
+          renderRequests(filter.dataset.requestFilter);
+        }
+      };
     }
 
     // HISTORY
