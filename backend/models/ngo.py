@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS ngos (
     organization_name TEXT NOT NULL,
     registration_number TEXT NOT NULL UNIQUE,
     description TEXT DEFAULT '',
-    email TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
     phone TEXT DEFAULT '',
     address TEXT DEFAULT '',
     city TEXT DEFAULT '',
@@ -97,6 +97,8 @@ def _validate_email(email):
 
 def _validate_website(url):
     """Allow only http:// or https:// URLs with a valid network location."""
+    if any(ch.isspace() for ch in url):
+        return False
     parsed = urlparse(url)
     return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
@@ -110,7 +112,9 @@ def validate_ngo_payload(data, is_update=False):
     if not is_update:
         for field in REQUIRED_NGO_FIELDS:
             raw = data.get(field)
-            value = "" if raw is None else str(raw).strip()
+            if raw is not None and not isinstance(raw, str):
+                raise ValueError(f"'{field}' must be a string.")
+            value = "" if raw is None else raw.strip()
             if not value:
                 raise ValueError(f"'{field}' is required.")
             cleaned[field] = value
@@ -120,8 +124,10 @@ def validate_ngo_payload(data, is_update=False):
     for field in candidate_fields:
         if field not in data or data[field] is None:
             continue
+        if not isinstance(data[field], str):
+            raise ValueError(f"'{field}' must be a string.")
 
-        value = str(data[field]).strip()
+        value = data[field].strip()
         if field in REQUIRED_NGO_FIELDS and not value:
             raise ValueError(f"'{field}' cannot be empty.")
 
@@ -131,8 +137,10 @@ def validate_ngo_payload(data, is_update=False):
 
         cleaned[field] = value
 
-    if "email" in cleaned and not _validate_email(cleaned["email"]):
-        raise ValueError("Please provide a valid email address.")
+    if "email" in cleaned:
+        cleaned["email"] = cleaned["email"].lower()
+        if not _validate_email(cleaned["email"]):
+            raise ValueError("Please provide a valid email address.")
 
     if cleaned.get("website") and not _validate_website(cleaned["website"]):
         raise ValueError("'website' must start with http:// or https:// and include a valid host.")
@@ -170,6 +178,13 @@ def create_ngo(db, user_id, data):
     ).fetchone()
     if existing_reg is not None:
         raise ConflictError("An NGO with this registration number already exists.")
+
+    existing_email = db.execute(
+        "SELECT id FROM ngos WHERE LOWER(email) = LOWER(?)",
+        (cleaned["email"],),
+    ).fetchone()
+    if existing_email is not None:
+        raise ConflictError("An NGO with this email address already exists.")
 
     now = _utc_now_iso()
     try:
@@ -211,11 +226,23 @@ def update_ngo_profile(db, ngo_id, data):
         raise LookupError("NGO profile not found.")
 
     cleaned = validate_ngo_payload(data, is_update=True)
+    if "email" in cleaned:
+        existing_email = db.execute(
+            "SELECT id FROM ngos WHERE LOWER(email) = LOWER(?) AND id != ?",
+            (cleaned["email"], ngo_id),
+        ).fetchone()
+        if existing_email is not None:
+            raise ConflictError("An NGO with this email address already exists.")
+
     cleaned["updated_at"] = _utc_now_iso()
 
     assignments = ", ".join(f"{field} = ?" for field in cleaned)
     values = list(cleaned.values()) + [ngo_id]
 
-    db.execute(f"UPDATE ngos SET {assignments} WHERE id = ?", values)
-    db.commit()
+    try:
+        db.execute(f"UPDATE ngos SET {assignments} WHERE id = ?", values)
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ConflictError("NGO profile conflicts with an existing record.") from exc
     return get_ngo_by_id(db, ngo_id)

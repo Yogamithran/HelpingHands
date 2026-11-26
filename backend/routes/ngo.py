@@ -238,6 +238,8 @@ def edit_ngo_profile():
         updated_ngo = update_ngo_profile(db, ngo["id"], _extract_payload())
     except LookupError as exc:
         return jsonify({"error": str(exc)}), 404
+    except ConflictError as exc:
+        return jsonify({"error": str(exc)}), 409
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
