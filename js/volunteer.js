@@ -299,6 +299,10 @@ shell(
           ? mine
           : mine.filter(r => r.status === status);
 
+        const emptyMessage = status === 'All'
+          ? "You haven't submitted any requests yet."
+          : `No ${status.toLowerCase()} requests found.`;
+
         el.innerHTML = `
           <div class="panel">
             <h5 class="mb-3">My requests</h5>
@@ -311,7 +315,7 @@ shell(
                 </button>
               `).join('')}
             </div>
-            ${tbl(filtered)}
+            ${tbl(filtered, emptyMessage)}
           </div>
         `;
       };
@@ -337,7 +341,7 @@ shell(
     }
 
     // REQUEST TABLE
-    function tbl(rows) {
+    function tbl(rows, emptyMessage = 'Nothing here yet. Join an activity to get started.') {
       return rows.length
         ? `
           <div class="table-responsive">
@@ -356,7 +360,7 @@ shell(
             </table>
           </div>
         `
-        : '<p class="text-muted mb-0">Nothing here yet. Join an activity to get started.</p>';
+        : `<p class="text-muted mb-0">${esc(emptyMessage)}</p>`;
     }
   }
 );
