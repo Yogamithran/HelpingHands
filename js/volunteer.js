@@ -242,10 +242,28 @@ shell(
 
         if (j) {
           const x = db();
+          const activityId = Number(j.dataset.j);
+          const activity = x.activities.find(a => a.id === activityId);
+
+          if (!activity) {
+            toast('This activity is no longer available.', 'danger');
+            go('acts');
+            return;
+          }
+
+          const alreadyRequested = x.requests.some(r =>
+            r.actId === activityId && r.volunteer === profile.name
+          );
+
+          if (alreadyRequested) {
+            toast('You have already requested this activity.', 'warning');
+            go('acts');
+            return;
+          }
 
           x.requests.push({
             id: nid(x.requests),
-            actId: +j.dataset.j,
+            actId: activityId,
             volunteer: profile.name,
             status: 'Pending'
           });
