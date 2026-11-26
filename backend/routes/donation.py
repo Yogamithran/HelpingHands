@@ -94,8 +94,10 @@ def _handle_integration_not_ready(exc):
 
 def _extract_payload():
     """Read JSON body when provided, otherwise fall back to form data."""
-    json_data = request.get_json(silent=True)
-    if isinstance(json_data, dict):
+    if request.is_json:
+        json_data = request.get_json(silent=True)
+        if not isinstance(json_data, dict):
+            raise ValueError("Request body must be a valid JSON object.")
         return json_data
     return request.form.to_dict()
 
@@ -159,17 +161,19 @@ def submit_donation():
     if error_response:
         return error_response
 
-    payload = _extract_payload()
-    if not str(payload.get("donor_name", "")).strip():
-        fallback_name = _extract_user_field(user, "name") or _extract_user_field(user, "full_name")
-        if fallback_name:
-            payload["donor_name"] = fallback_name
-    if not str(payload.get("donor_email", "")).strip():
-        fallback_email = _extract_user_field(user, "email")
-        if fallback_email:
-            payload["donor_email"] = fallback_email
-
     try:
+        payload = _extract_payload()
+        raw_name = payload.get("donor_name")
+        if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
+            fallback_name = _extract_user_field(user, "name") or _extract_user_field(user, "full_name")
+            if fallback_name:
+                payload["donor_name"] = fallback_name
+        raw_email = payload.get("donor_email")
+        if raw_email is None or (isinstance(raw_email, str) and not raw_email.strip()):
+            fallback_email = _extract_user_field(user, "email")
+            if fallback_email:
+                payload["donor_email"] = fallback_email
+
         donation = create_donation(db, payload, donor_id=donor_id)
     except PermissionError as exc:
         return jsonify({"error": str(exc)}), 403
@@ -229,7 +233,10 @@ def view_my_donation(donation_id):
     if error_response:
         return error_response
 
-    donation = get_donation_by_id(db, donation_id, donor_id=donor_id)
+    try:
+        donation = get_donation_by_id(db, donation_id, donor_id=donor_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     if donation is None:
         return jsonify({"error": "Donation not found for this donor."}), 404
 
@@ -317,7 +324,10 @@ def view_ngo_donation(donation_id):
     if error_response:
         return error_response
 
-    donation = get_donation_by_id(db, donation_id, ngo_id=ngo["id"])
+    try:
+        donation = get_donation_by_id(db, donation_id, ngo_id=ngo["id"])
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     if donation is None:
         return jsonify({"error": "Donation not found for this NGO."}), 404
 
@@ -335,12 +345,12 @@ def update_ngo_donation_status(donation_id):
     if error_response:
         return error_response
 
-    payload = _extract_payload()
-    new_status = payload.get("status")
-    if new_status is None or not str(new_status).strip():
-        return jsonify({"error": "'status' is required."}), 400
-
     try:
+        payload = _extract_payload()
+        new_status = payload.get("status")
+        if new_status is None or (isinstance(new_status, str) and not new_status.strip()):
+            return jsonify({"error": "'status' is required."}), 400
+
         donation = update_donation_status_by_ngo(db, donation_id, ngo["id"], new_status)
     except LookupError as exc:
         return jsonify({"error": str(exc)}), 404
