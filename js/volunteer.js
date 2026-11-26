@@ -182,7 +182,7 @@ shell(
         <div class="row g-2 mb-3">
           <div class="col-md-7">
             <input id="q" class="form-control"
-              placeholder="Search by title or location">
+              placeholder="Search by title, location or NGO">
           </div>
           <div class="col-md-5">
             <select id="f" class="form-select">
@@ -200,7 +200,7 @@ shell(
         const f = $('#f').value;
 
         const activities = d.activities.filter(a =>
-          (a.title + a.location).toLowerCase().includes(q) &&
+          [a.title, a.location, a.ngo].some(value => String(value || "").toLowerCase().includes(q)) &&
           (!f || a.location === f)
         );
 
